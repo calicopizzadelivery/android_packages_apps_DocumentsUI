@@ -28,6 +28,7 @@ import android.content.ContentProviderClient;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.content.pm.UserProperties;
 import android.database.Cursor;
 import android.net.Uri;
@@ -168,6 +169,19 @@ public class DirectoryFragment extends Fragment implements SwipeRefreshLayout.On
     @Injected
     @ContentScoped
     private FocusManager mFocusManager;
+    /**
+     * True on a television. There is no touch there, and no Tab key on a
+     * remote or a game controller, so focus has to be put in the file list
+     * for it to be reachable at all. See ModelUpdateListener.
+     */
+    private boolean mIsLeanback;
+    /**
+     * Set when a listing finishes loading on leanback, cleared once the list
+     * has actually taken focus. The model update arrives before the list has
+     * laid out, and focusDirectoryList() does nothing until there is a
+     * visible item to focus, so the request has to wait for layout.
+     */
+    private boolean mPendingLeanbackFocus;
 
     @Injected
     @ContentScoped
@@ -526,6 +540,34 @@ public class DirectoryFragment extends Fragment implements SwipeRefreshLayout.On
             public void onLayoutCompleted(RecyclerView.State state) {
                 super.onLayoutCompleted(state);
                 mFocusManager.onLayoutCompleted();
+
+                // Directional focus does not cross from the toolbar into this
+                // list, and no remote or game controller has the Tab key that
+                // would, so on a television the files are otherwise
+                // unreachable. Cleared as soon as it takes, so focus is never
+                // pulled back from a user who has moved it themselves.
+                // Focus the first actual document, not focusDirectoryList():
+                // that takes the first *visible* item, which here is the
+                // "can't use this folder" header, leaving focus on a button
+                // the d-pad cannot leave. focusDocument() retries by itself
+                // once the holder exists, so asking once is enough.
+                // Re-assert until a document really holds focus. A listing
+                // settles over several layout passes, and an item focused on
+                // an earlier one loses focus when its view is recycled, after
+                // which the framework falls back to the first focusable view
+                // -- a button in the header. hasFocusedItem() is true only for
+                // a document, so this stops as soon as the job is done and
+                // never pulls focus back from a user who has moved it.
+                if (mPendingLeanbackFocus) {
+                    if (mFocusManager.hasFocusedItem()) {
+                        mPendingLeanbackFocus = false;
+                    } else {
+                        String[] ids = mModel.getModelIds();
+                        if (ids != null && ids.length > 0) {
+                            mFocusManager.focusDocument(ids[0]);
+                        }
+                    }
+                }
             }
         };
 
@@ -542,6 +584,8 @@ public class DirectoryFragment extends Fragment implements SwipeRefreshLayout.On
                 new DocsSelectionPredicate(mInjector.config, mState, mModel, mRecView);
 
         mFocusManager = mInjector.getFocusManager(mRecView, mModel);
+        mIsLeanback = getContext().getPackageManager()
+                .hasSystemFeature(PackageManager.FEATURE_LEANBACK);
         mActions = mInjector.getActionHandler(mContentLock);
 
         mRecView.setAccessibilityDelegateCompat(
@@ -1494,6 +1538,12 @@ public class DirectoryFragment extends Fragment implements SwipeRefreshLayout.On
                 new Handler().postDelayed(
                         () -> mRefreshLayout.setRefreshing(false),
                         REFRESH_SPINNER_TIMEOUT);
+            }
+
+            // On a television, ask for the file list to take focus. Honoured
+            // in onLayoutCompleted below, once there is something to focus.
+            if (mIsLeanback && !mModel.isLoading() && !mFocusManager.hasFocusedItem()) {
+                mPendingLeanbackFocus = true;
             }
 
             if (!mModel.isLoading()) {
